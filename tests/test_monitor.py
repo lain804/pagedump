@@ -1,6 +1,11 @@
+import asyncio
+import tempfile
+import threading
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
-from pagedump.monitor import categorize
+from pagedump.monitor import _AssetCollector, asset_path, categorize, monitor, write_asset
 
 
 class CategorizeTests(unittest.TestCase):
@@ -25,3 +30,251 @@ class CategorizeTests(unittest.TestCase):
                                           ("xhr", "events", None)):
             with self.subTest(path=path):
                 self.assertEqual(categorize(resource, "https://example.com/" + path), category)
+
+
+class Request:
+    def __init__(self, url, resource_type="image"):
+        self.url = url
+        self.resource_type = resource_type
+
+
+class Response:
+    def __init__(self, url="https://example.com/image.png", *, status=200,
+                 mime="image/png", body=b"image", delay=0, read=None, headers=None):
+        self.request = Request(url)
+        self.status = status
+        self.headers = {"content-type": mime, **(headers or {})}
+        self._body = body
+        self.delay = delay
+        self.read = read
+        self.reads = 0
+
+    async def body(self):
+        self.reads += 1
+        if self.read:
+            return await self.read()
+        await asyncio.sleep(self.delay)
+        return self._body
+
+
+class Page:
+    def __init__(self):
+        self.handlers = {}
+
+    def on(self, event, handler):
+        self.handlers[event] = handler
+
+    def remove_listener(self, event, handler):
+        self.handlers.pop(event, None)
+
+
+class AssetPathTests(unittest.TestCase):
+    def test_names_are_stable_unique_and_safe(self):
+        root = Path("output")
+        urls = ["https://example.com/a/image.png", "https://example.com/b/image.png",
+                "https://example.com/a/image.png?v=2", "https://example.com/%2e%2e%2f%00CON.png",
+                "https://example.com/" + "猫" * 300 + ".png", "https://example.com/.."]
+        paths = [asset_path(root, "images", url) for url in urls]
+        self.assertEqual(len(set(paths)), len(urls))
+        self.assertEqual(paths, [asset_path(root, "images", url) for url in urls])
+        for path in paths:
+            self.assertEqual(path.parent, root / "images")
+            self.assertLessEqual(len(path.name.encode()), 255)
+            self.assertNotIn("\x00", path.name)
+        self.assertEqual(paths[0].suffix, ".png")
+
+    def test_failed_atomic_replace_preserves_original_and_cleans_temp(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            destination = Path(tmp) / "asset.png"
+            destination.write_bytes(b"original")
+            with patch("pagedump.monitor.os.replace", side_effect=OSError("disk failure")):
+                with self.assertRaises(OSError):
+                    write_asset(destination, b"replacement")
+            self.assertEqual(destination.read_bytes(), b"original")
+            self.assertEqual(list(Path(tmp).iterdir()), [destination])
+
+
+class CollectorTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.collector = _AssetCollector(self.root, {"all"}, 0.2, 3, 0.01)
+        self.addAsyncCleanup(self.collector.close)
+        self.page = Page()
+        await self.collector.setup(self.page)
+
+    async def test_concurrency_is_bounded_and_duplicates_are_read_once(self):
+        active = maximum = 0
+
+        async def read():
+            nonlocal active, maximum
+            active += 1
+            maximum = max(maximum, active)
+            try:
+                await asyncio.sleep(0.002)
+                return b"asset"
+            finally:
+                active -= 1
+
+        responses = [Response(f"https://example.com/{i}/image.png", read=read) for i in range(40)]
+        for response in responses:
+            self.collector.on_response(response)
+            self.collector.on_response(response)
+        await self.collector.wait_for_idle(self.page)
+        self.assertEqual(maximum, 3)
+        self.assertEqual(sum(r.reads for r in responses), 40)
+        self.assertEqual(len(self.collector.captured["images"]), 40)
+        self.assertEqual(len(list((self.root / "images").iterdir())), 40)
+        self.assertFalse(self.page.handlers)
+
+    async def test_late_response_is_drained_before_finishing(self):
+        first = Response(delay=0.02)
+        late = Response("https://example.com/late.png", delay=0.02)
+        self.collector.on_response(first)
+
+        async def enqueue_late():
+            await asyncio.sleep(0.01)
+            self.collector.on_response(late)
+
+        enqueue = asyncio.create_task(enqueue_late())
+        await self.collector.wait_for_idle(self.page)
+        await enqueue
+        self.assertEqual(set(self.collector.captured["images"]), {first.request.url, late.request.url})
+
+    async def test_unrelated_polling_does_not_delay_idle(self):
+        async def poll():
+            for _ in range(100):
+                request = Request("https://example.com/events", "xhr")
+                self.collector.on_request(request)
+                self.collector.on_request_done(request)
+                await asyncio.sleep(0.005)
+
+        polling = asyncio.create_task(poll())
+        try:
+            await asyncio.wait_for(self.collector.wait_for_idle(self.page), 0.15)
+            self.assertFalse(polling.done())
+        finally:
+            polling.cancel()
+            await asyncio.gather(polling, return_exceptions=True)
+
+    async def test_selected_request_without_headers_keeps_collection_open(self):
+        request = Request("https://example.com/slow.png")
+        self.collector.on_request(request)
+        waiting = asyncio.create_task(self.collector.wait_for_idle(self.page))
+        await asyncio.sleep(0.02)
+        self.assertFalse(waiting.done())
+        self.collector.on_response(Response(request.url))
+        self.collector.on_request_done(request)
+        await asyncio.wait_for(waiting, 0.5)
+        self.assertEqual(self.collector.captured["images"], [request.url])
+
+    async def test_status_filter_and_partial_content(self):
+        responses = [Response(f"https://example.com/{status}.png", status=status)
+                     for status in (204, 205, 302, 304, 404, 500)]
+        partial = Response("https://example.com/partial.mp4", status=206, mime="video/mp4",
+                           headers={"content-range": "bytes 0-2/6"})
+        complete = Response("https://example.com/complete.mp4", status=206, mime="video/mp4",
+                            headers={"content-range": "bytes 0-5/6"}, body=b"abcdef")
+        with self.assertLogs("pagedump", level="WARNING"):
+            for response in [*responses, partial, complete]:
+                self.collector.on_response(response)
+        await self.collector.wait_for_idle(self.page)
+        self.assertEqual(sum(r.reads for r in responses), 0)
+        self.assertEqual(partial.reads, 0)
+        self.assertEqual(self.collector.captured, {"video": [complete.request.url]})
+
+    async def test_media_selection_includes_extensionless_audio_and_video(self):
+        self.collector.selected = {"media", "audio", "video"}
+        self.collector.on_response(Response("https://example.com/song", mime="audio/ogg"))
+        self.collector.on_response(Response("https://example.com/movie", mime="video/webm"))
+        self.collector.on_response(Response())
+        await self.collector.wait_for_idle(self.page)
+        self.assertEqual(set(self.collector.captured), {"audio", "video"})
+
+    async def test_body_timeout_is_reported_without_recording_a_saved_asset(self):
+        self.collector.timeout = 0.01
+        self.collector.on_response(Response(delay=10))
+        with self.assertLogs("pagedump", level="WARNING"):
+            await asyncio.wait_for(self.collector.wait_for_idle(self.page), 0.5)
+        self.assertFalse(self.collector.captured)
+        self.assertFalse(list(self.root.iterdir()))
+
+    async def test_shutdown_waits_for_in_progress_disk_write(self):
+        started, release = threading.Event(), threading.Event()
+
+        def write(destination, body):
+            started.set()
+            if not release.wait(2):
+                raise RuntimeError("test did not release writer")
+            write_asset(destination, body)
+
+        with patch("pagedump.monitor.write_asset", side_effect=write):
+            self.collector.on_response(Response())
+            self.assertTrue(await asyncio.to_thread(started.wait, 1))
+            closing = asyncio.create_task(self.collector.close())
+            try:
+                await asyncio.sleep(0.01)
+                self.assertFalse(closing.done())
+            finally:
+                release.set()
+                await asyncio.wait_for(closing, 1)
+        self.assertEqual(len(self.collector.captured["images"]), 1)
+        self.assertTrue(all(worker.done() for worker in self.collector._workers))
+
+
+class MonitorTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    def session(self, fetch):
+        class Session:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                pass
+
+        Session.fetch = fetch
+        return patch("pagedump.monitor.AsyncStealthySession", Session)
+
+    async def test_deadline_keeps_saved_assets_and_cancels_workers(self):
+        async def fetch(session, url, **kwargs):
+            self.assertEqual(session.kwargs["retries"], 1)
+            self.assertFalse(kwargs["network_idle"])
+            page = Page()
+            await kwargs["page_setup"](page)
+            page.handlers["response"](Response())
+            page.handlers["domcontentloaded"]()
+            await asyncio.sleep(10)
+
+        with self.session(fetch), self.assertLogs("pagedump", level="WARNING"):
+            result = await monitor("https://example.com", headed=False, selected={"images"},
+                                   timeout=200, output_dir=self.root)
+        self.assertEqual(len(result["images"]), 1)
+
+    async def test_deadline_without_assets_is_an_error(self):
+        async def fetch(session, url, **kwargs):
+            await asyncio.sleep(10)
+
+        with self.session(fetch), self.assertRaises(TimeoutError):
+            await monitor("https://example.com", headed=False, selected={"images"},
+                          timeout=10, output_dir=self.root)
+
+    async def test_disk_error_propagates_instead_of_claiming_success(self):
+        async def fetch(session, url, **kwargs):
+            page = Page()
+            await kwargs["page_setup"](page)
+            page.handlers["response"](Response())
+            page.handlers["domcontentloaded"]()
+            await asyncio.sleep(10)
+
+        with self.session(fetch), patch("pagedump.monitor.write_asset", side_effect=OSError("disk full")):
+            with self.assertLogs("pagedump", level="ERROR"), self.assertRaisesRegex(OSError, "disk full"):
+                await monitor("https://example.com", headed=False, selected={"images"},
+                              timeout=1000, idle_timeout=0, output_dir=self.root)
