@@ -67,6 +67,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Directory for downloaded assets (default: ./output)",
     )
     parser.add_argument("--headed", action="store_true", help="Show the browser UI")
+    parser.add_argument(
+        "--solve-cloudflare", action="store_true",
+        help="Enable Cloudflare challenge solving (adds waiting even on ordinary pages)",
+    )
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable debug logging")
     parser.add_argument(
         "--assets", nargs="+", choices=("all", *sorted(ASSET_TYPES)), default=["all"],
@@ -74,7 +78,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--timeout", "--load-timeout", dest="timeout", type=int, default=30_000, metavar="MS",
-        help="Maximum wait for browser operations, including network idle (default: 30000 ms)",
+        help="Collection deadline after browser startup (default: 30000 ms)",
+    )
+    parser.add_argument(
+        "--idle-timeout", type=int, default=500, metavar="MS",
+        help="Finish after selected assets are idle for this long (default: 500 ms)",
+    )
+    parser.add_argument(
+        "--concurrency", type=int, default=8, metavar="N",
+        help="Maximum concurrent response body reads and file writes (default: 8)",
     )
     return parser
 
@@ -84,6 +96,10 @@ def main(argv: Sequence[str] | None = None) -> None:
     args = parser.parse_args(argv)
     if args.timeout <= 0:
         parser.error("timeout must be positive milliseconds")
+    if args.idle_timeout < 0:
+        parser.error("idle-timeout must be nonnegative milliseconds")
+    if args.concurrency <= 0:
+        parser.error("concurrency must be positive")
 
     try:
         cookies = load_netscape_cookies(args.cookies) if args.cookies else None
@@ -98,9 +114,15 @@ def main(argv: Sequence[str] | None = None) -> None:
         captured = asyncio.run(
             monitor(args.url, headed=args.headed, selected=set(args.assets),
                     timeout=args.timeout,
+                    idle_timeout=args.idle_timeout,
+                    concurrency=args.concurrency,
+                    solve_cloudflare=args.solve_cloudflare,
                     cookies=cookies,
                     output_dir=args.output)
         )
+    except KeyboardInterrupt:
+        logger.info("Interrupted")
+        raise SystemExit(130) from None
     except Exception as exc:
         logger.error("Browser session failed: %s", exc)
         raise SystemExit(1) from exc
@@ -110,4 +132,5 @@ def main(argv: Sequence[str] | None = None) -> None:
             logger.debug("%s (%d)", category, len(urls))
             for url in urls:
                 logger.debug("  %s", url)
-    print("Ready")
+    count = sum(len(urls) for urls in captured.values())
+    print(f"Saved {count} {'asset' if count == 1 else 'assets'} to {args.output}")
