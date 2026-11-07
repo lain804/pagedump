@@ -302,6 +302,21 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
                                    timeout=200, output_dir=self.root)
         self.assertEqual(len(result["images"]), 1)
 
+    async def test_cloudflare_is_enabled_by_default_and_finishes_through_page_action(self):
+        async def fetch(session, url, **kwargs):
+            self.assertTrue(session.kwargs["solve_cloudflare"])
+            page = Page()
+            await kwargs["page_setup"](page)
+            response = Response()
+            page.handlers["response"](response)
+            page.handlers["requestfinished"](response.request)
+            await kwargs["page_action"](page)
+
+        with self.session(fetch):
+            result = await monitor("https://example.com", headed=False, selected={"images"},
+                                   timeout=1000, idle_timeout=0, output_dir=self.root)
+        self.assertEqual(result, {"images": ["https://example.com/image.png"]})
+
     async def test_deadline_without_assets_is_an_error(self):
         async def fetch(session, url, **kwargs):
             await asyncio.sleep(10)
@@ -323,4 +338,4 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
         with self.session(fetch), patch("pagedump.monitor.write_asset", side_effect=OSError("disk full")):
             with self.assertLogs("pagedump", level="ERROR"), self.assertRaisesRegex(OSError, "disk full"):
                 await monitor("https://example.com", headed=False, selected={"images"},
-                              timeout=1000, idle_timeout=0, output_dir=self.root)
+                              timeout=1000, idle_timeout=0, output_dir=self.root, solve_cloudflare=False)

@@ -304,7 +304,7 @@ async def _collect(session: AsyncStealthySession, collector: _AssetCollector,
 async def monitor(
     url: str, *, headed: bool, selected: set[str], timeout: int,
     output_dir: Path, cookies: list[dict[str, object]] | None = None,
-    concurrency: int = 8, idle_timeout: int = 500, solve_cloudflare: bool = False,
+    concurrency: int = 8, idle_timeout: int = 500, solve_cloudflare: bool = True,
 ) -> dict[str, list[str]]:
     if timeout <= 0 or concurrency <= 0 or idle_timeout < 0:
         raise ValueError("timeout and concurrency must be positive; idle_timeout must be nonnegative")

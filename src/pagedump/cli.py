@@ -68,8 +68,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--headed", action="store_true", help="Show the browser UI")
     parser.add_argument(
-        "--solve-cloudflare", action="store_true",
-        help="Enable Cloudflare challenge solving (adds waiting even on ordinary pages)",
+        "--solve-cloudflare", action=argparse.BooleanOptionalAction, default=True,
+        help="Solve Cloudflare challenges (default: enabled; adds waiting even on ordinary pages)",
     )
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable debug logging")
     parser.add_argument(

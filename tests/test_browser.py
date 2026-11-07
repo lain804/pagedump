@@ -82,7 +82,8 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
             with tempfile.TemporaryDirectory() as tmp:
                 started = asyncio.get_running_loop().time()
                 result = await monitor(f"http://127.0.0.1:{port}/", headed=False, selected={"images"},
-                                       timeout=5000, output_dir=Path(tmp), idle_timeout=300)
+                                       timeout=5000, output_dir=Path(tmp), idle_timeout=300,
+                                       solve_cloudflare=False)
                 elapsed = asyncio.get_running_loop().time() - started
                 self.assertEqual({url.rsplit("/", 1)[-1] for url in result["images"]},
                                  {"delayed", "background"})
@@ -94,14 +95,14 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
                 started = asyncio.get_running_loop().time()
                 scripts = await monitor(f"http://127.0.0.1:{port}/scripts", headed=False,
                                         selected={"scripts"}, timeout=5000, output_dir=Path(tmp),
-                                        idle_timeout=300)
+                                        idle_timeout=300, solve_cloudflare=False)
                 self.assertLess(asyncio.get_running_loop().time() - started, 4,
                                 "unselected hanging images must not delay selected scripts")
                 self.assertEqual(scripts, {"scripts": [f"http://127.0.0.1:{port}/app.js"]})
                 with self.assertLogs("pagedump", level="WARNING"):
                     mixed = await monitor(f"http://127.0.0.1:{port}/mixed", headed=False,
                                           selected={"images"}, timeout=1200, output_dir=Path(tmp),
-                                          concurrency=3)
+                                          concurrency=3, solve_cloudflare=False)
                 self.assertEqual(mixed, {"images": [f"http://localhost:{port}/delayed"]},
                                  "stalled response bodies must not starve a completed asset")
         finally:

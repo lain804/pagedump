@@ -24,7 +24,8 @@ Use it with a page URL:
 pagedump https://example.com
 pagedump https://example.com --assets images fonts -o ./assets
 pagedump https://example.com --assets media --timeout 15000
-pagedump https://example.com --cookies cookies.txt --solve-cloudflare
+pagedump https://example.com --cookies cookies.txt
+pagedump https://example.com --no-solve-cloudflare
 ```
 
 Asset categories are `scripts`, `images`, `css`, `fonts`, `audio`, `video`,
@@ -38,10 +39,11 @@ cannot overwrite each other. Only successfully saved URLs count toward the
 reported total. Writes use temporary files and atomic replacement; filesystem
 errors cause a nonzero exit status.
 
-Collection finishes after the DOM is ready, scripts and styles have finished,
+After page preparation, collection finishes once scripts and styles have finished
 and selected assets have been idle for `--idle-timeout` milliseconds (default:
-500). Unrelated background polling and unselected slow resources do not hold
-normal collection open. Increase this window for pages that discover assets
+500). With `--no-solve-cloudflare`, collection watches assets after DOM readiness,
+so unrelated background polling and unselected slow resources do not hold it
+open. Increase this window for pages that discover assets
 later. `--concurrency` limits simultaneous body reads and disk writes (default:
 8); browser request concurrency is unchanged.
 
@@ -53,8 +55,9 @@ and emits a warning; timing out before saving any selected assets exits with an
 error. Navigations are attempted once rather than silently multiplying the wait
 through retries.
 
-Cloudflare solving is opt-in with `--solve-cloudflare`; it adds waiting even on
-ordinary pages and waits for the solver before evaluating asset idleness.
+Cloudflare solving is enabled by default; it waits for page loading and the
+solver before evaluating asset idleness, adding waiting even on ordinary pages.
+Use `--no-solve-cloudflare` to disable it, or `--solve-cloudflare` to enable it explicitly.
 `--headed` shows the browser and `-v` lists saved URLs. Cookie files use Netscape
 format.
 

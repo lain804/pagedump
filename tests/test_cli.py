@@ -8,6 +8,15 @@ from pagedump.cli import main
 
 
 class CliTests(unittest.TestCase):
+    def test_cloudflare_is_enabled_by_default_and_can_be_disabled(self):
+        for flags, enabled in (([], True), (["--solve-cloudflare"], True),
+                               (["--no-solve-cloudflare"], False)):
+            with self.subTest(flags=flags):
+                run = AsyncMock(return_value={})
+                with patch("pagedump.cli.monitor", run), contextlib.redirect_stdout(io.StringIO()):
+                    main(["https://example.com", *flags])
+                self.assertEqual(run.await_args.kwargs["solve_cloudflare"], enabled)
+
     def test_options_reach_monitor_and_summary_counts_saved_urls(self):
         run = AsyncMock(return_value={"images": ["https://example.com/asset"]})
         output = io.StringIO()
