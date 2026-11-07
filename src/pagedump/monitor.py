@@ -21,6 +21,8 @@ EXTENSION_TYPES = {
     ".mp4": "video", ".webm": "video", ".mov": "video", ".m4v": "video",
     ".avi": "video", ".mkv": "video", ".html": "documents", ".htm": "documents",
     ".xhtml": "documents",
+    ".pdf": "documents", ".bmp": "images", ".tif": "images", ".tiff": "images",
+    ".opus": "audio", ".weba": "audio", ".m3u8": "media", ".mpd": "media",
 }
 RESOURCE_TYPES = {
     "script": "scripts", "image": "images", "stylesheet": "css", "font": "fonts",
@@ -28,8 +30,30 @@ RESOURCE_TYPES = {
 }
 
 
-def categorize(resource_type: str, url: str) -> str | None:
-    suffix = urlsplit(url).path.rsplit("/", 1)[-1].lower()
+MIME_TYPES = {
+    "text/css": "css", "text/javascript": "scripts",
+    "application/javascript": "scripts", "application/x-javascript": "scripts",
+    "application/ecmascript": "scripts", "text/ecmascript": "scripts",
+    "application/wasm": "scripts", "text/html": "documents",
+    "application/xhtml+xml": "documents", "application/pdf": "documents",
+    "application/font-woff": "fonts", "application/x-font-woff": "fonts",
+    "application/vnd.ms-fontobject": "fonts", "application/x-font-ttf": "fonts",
+    "application/x-font-opentype": "fonts", "application/ogg": "media",
+    "application/vnd.apple.mpegurl": "media", "application/x-mpegurl": "media",
+    "application/dash+xml": "media",
+}
+
+
+def categorize(resource_type: str, url: str, content_type: str = "") -> str | None:
+    """Prefer response metadata, including for extensionless and XHR assets."""
+    mime = content_type.partition(";")[0].strip().lower()
+    for prefix, category in (("image/", "images"), ("font/", "fonts"),
+                             ("audio/", "audio"), ("video/", "video")):
+        if mime.startswith(prefix):
+            return category
+    if mime in MIME_TYPES:
+        return MIME_TYPES[mime]
+    suffix = unquote(urlsplit(url).path).rsplit("/", 1)[-1].lower()
     extension_category = EXTENSION_TYPES.get("." + suffix.rsplit(".", 1)[-1]) if "." in suffix else None
     if extension_category:
         return extension_category
@@ -43,6 +67,8 @@ async def monitor(
     output_dir: Path, cookies: list[dict[str, object]] | None = None,
 ) -> dict[str, list[str]]:
     selected_types = ASSET_TYPES if "all" in selected else selected
+    if "media" in selected_types:
+        selected_types = selected_types | {"audio", "video"}
     captured: dict[str, list[str]] = defaultdict(list)
     saved_urls: dict[Path, str] = {}
     save_lock = asyncio.Lock()
@@ -50,7 +76,7 @@ async def monitor(
 
     async def save_response(response: object) -> None:
         request = response.request
-        category = categorize(request.resource_type, request.url)
+        category = categorize(request.resource_type, request.url, response.headers.get("content-type", ""))
         if category not in selected_types:
             return
 
@@ -75,18 +101,13 @@ async def monitor(
             body = await response.body()
             destination_dir.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(body)
+            if request.url not in captured[category]:
+                captured[category].append(request.url)
         except Exception as exc:
             # Some responses have no readable body (for example, failed or aborted requests).
             logging.getLogger("pagedump").debug("Could not save %s: %s", request.url, exc)
 
     async def setup(page: object) -> None:
-        def on_request(request: object) -> None:
-            category = categorize(request.resource_type, request.url)
-            if category in selected_types:
-                captured[category].append(request.url)
-
-        page.on("request", on_request)
-
         def on_response(response: object) -> None:
             task = asyncio.create_task(save_response(response))
             save_tasks.add(task)
