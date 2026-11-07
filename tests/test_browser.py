@@ -36,6 +36,16 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
                     body = b"<!doctype html><img src='/blocked-image'><script src='/app.js'></script>"
                 elif path == b"/app.js":
                     mime, body = "text/javascript", b"window.loaded = true;"
+                elif path == b"/mixed":
+                    mime = "text/html"
+                    body = ("<!doctype html>" + "".join(f"<img src='/stalled{i}'>" for i in range(10))
+                            + f"<img src='http://localhost:{port}/delayed'>").encode()
+                elif path.startswith(b"/stalled"):
+                    writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: image/png\r\n"
+                                 b"Content-Length: 100000\r\nConnection: close\r\n\r\n")
+                    await writer.drain()
+                    await reader.read()
+                    return
                 elif path == b"/blocked-image":
                     await reader.read()
                     return
@@ -54,9 +64,14 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
                 writer.write((f"HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\n"
                               f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n").encode() + body)
                 await writer.drain()
+            except (asyncio.IncompleteReadError, ConnectionError):
+                pass  # Chromium can open speculative connections and close them unused.
             finally:
                 writer.close()
-                await writer.wait_closed()
+                try:
+                    await writer.wait_closed()
+                except ConnectionError:
+                    pass
                 connections.discard(writer)
 
         server = await asyncio.start_server(handle, "127.0.0.1", 0)
@@ -83,6 +98,12 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
                 self.assertLess(asyncio.get_running_loop().time() - started, 4,
                                 "unselected hanging images must not delay selected scripts")
                 self.assertEqual(scripts, {"scripts": [f"http://127.0.0.1:{port}/app.js"]})
+                with self.assertLogs("pagedump", level="WARNING"):
+                    mixed = await monitor(f"http://127.0.0.1:{port}/mixed", headed=False,
+                                          selected={"images"}, timeout=1200, output_dir=Path(tmp),
+                                          concurrency=3)
+                self.assertEqual(mixed, {"images": [f"http://localhost:{port}/delayed"]},
+                                 "stalled response bodies must not starve a completed asset")
         finally:
             for writer in list(connections):
                 writer.close()

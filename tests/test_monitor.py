@@ -104,6 +104,10 @@ class CollectorTests(unittest.IsolatedAsyncioTestCase):
         self.page = Page()
         await self.collector.setup(self.page)
 
+    def complete(self, response):
+        self.collector.on_response(response)
+        self.collector.on_request_done(response.request)
+
     async def test_concurrency_is_bounded_and_duplicates_are_read_once(self):
         active = maximum = 0
 
@@ -119,8 +123,8 @@ class CollectorTests(unittest.IsolatedAsyncioTestCase):
 
         responses = [Response(f"https://example.com/{i}/image.png", read=read) for i in range(40)]
         for response in responses:
-            self.collector.on_response(response)
-            self.collector.on_response(response)
+            self.complete(response)
+            self.complete(response)
         await self.collector.wait_for_idle(self.page)
         self.assertEqual(maximum, 3)
         self.assertEqual(sum(r.reads for r in responses), 40)
@@ -131,11 +135,11 @@ class CollectorTests(unittest.IsolatedAsyncioTestCase):
     async def test_late_response_is_drained_before_finishing(self):
         first = Response(delay=0.02)
         late = Response("https://example.com/late.png", delay=0.02)
-        self.collector.on_response(first)
+        self.complete(first)
 
         async def enqueue_late():
             await asyncio.sleep(0.01)
-            self.collector.on_response(late)
+            self.complete(late)
 
         enqueue = asyncio.create_task(enqueue_late())
         await self.collector.wait_for_idle(self.page)
@@ -164,7 +168,7 @@ class CollectorTests(unittest.IsolatedAsyncioTestCase):
         waiting = asyncio.create_task(self.collector.wait_for_idle(self.page))
         await asyncio.sleep(0.02)
         self.assertFalse(waiting.done())
-        self.collector.on_response(Response(request.url))
+        self.complete(Response(request.url))
         self.collector.on_request_done(request)
         await asyncio.wait_for(waiting, 0.5)
         self.assertEqual(self.collector.captured["images"], [request.url])
@@ -178,7 +182,7 @@ class CollectorTests(unittest.IsolatedAsyncioTestCase):
                             headers={"content-range": "bytes 0-5/6"}, body=b"abcdef")
         with self.assertLogs("pagedump", level="WARNING"):
             for response in [*responses, partial, complete]:
-                self.collector.on_response(response)
+                self.complete(response)
         await self.collector.wait_for_idle(self.page)
         self.assertEqual(sum(r.reads for r in responses), 0)
         self.assertEqual(partial.reads, 0)
@@ -186,15 +190,15 @@ class CollectorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_media_selection_includes_extensionless_audio_and_video(self):
         self.collector.selected = {"media", "audio", "video"}
-        self.collector.on_response(Response("https://example.com/song", mime="audio/ogg"))
-        self.collector.on_response(Response("https://example.com/movie", mime="video/webm"))
-        self.collector.on_response(Response())
+        self.complete(Response("https://example.com/song", mime="audio/ogg"))
+        self.complete(Response("https://example.com/movie", mime="video/webm"))
+        self.complete(Response())
         await self.collector.wait_for_idle(self.page)
         self.assertEqual(set(self.collector.captured), {"audio", "video"})
 
     async def test_body_timeout_is_reported_without_recording_a_saved_asset(self):
         self.collector.timeout = 0.01
-        self.collector.on_response(Response(delay=10))
+        self.complete(Response(delay=10))
         with self.assertLogs("pagedump", level="WARNING"):
             await asyncio.wait_for(self.collector.wait_for_idle(self.page), 0.5)
         self.assertFalse(self.collector.captured)
@@ -210,7 +214,7 @@ class CollectorTests(unittest.IsolatedAsyncioTestCase):
             write_asset(destination, body)
 
         with patch("pagedump.monitor.write_asset", side_effect=write):
-            self.collector.on_response(Response())
+            self.complete(Response())
             self.assertTrue(await asyncio.to_thread(started.wait, 1))
             closing = asyncio.create_task(self.collector.close())
             try:
@@ -221,6 +225,44 @@ class CollectorTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.wait_for(closing, 1)
         self.assertEqual(len(self.collector.captured["images"]), 1)
         self.assertTrue(all(worker.done() for worker in self.collector._workers))
+
+    async def test_stalled_responses_do_not_occupy_save_workers(self):
+        stalled = [Response(f"https://example.com/stalled{i}.png", delay=10) for i in range(10)]
+        for response in stalled:
+            self.collector.on_response(response)
+        ready = Response("https://example.com/ready.png")
+        self.complete(ready)
+        await asyncio.wait_for(self.collector._queue.join(), 0.5)
+        self.assertEqual(self.collector.captured["images"], [ready.request.url])
+        self.assertEqual(sum(response.reads for response in stalled), 0)
+        with self.assertLogs("pagedump", level="WARNING"):
+            for response in stalled:
+                self.collector.on_request_failed(response.request)
+        await self.collector.wait_for_idle(self.page)
+
+    async def test_failed_body_read_uses_completed_duplicate_as_fallback(self):
+        async def fail():
+            await asyncio.sleep(0.01)
+            raise RuntimeError("body unavailable")
+
+        failed = Response(read=fail)
+        fallback = Response(body=b"fallback")
+        with self.assertLogs("pagedump", level="WARNING"):
+            self.complete(failed)
+            self.complete(fallback)
+            await asyncio.wait_for(self.collector.wait_for_idle(self.page), 0.5)
+        self.assertEqual(fallback.reads, 1)
+        self.assertEqual(self.collector.captured["images"], [fallback.request.url])
+        self.assertEqual(next((self.root / "images").iterdir()).read_bytes(), b"fallback")
+
+    async def test_completed_duplicate_can_replace_a_stalled_first_request(self):
+        stalled = Response(delay=10)
+        ready = Response(body=b"ready")
+        self.collector.on_response(stalled)
+        self.complete(ready)
+        await asyncio.wait_for(self.collector._queue.join(), 0.5)
+        self.assertEqual(stalled.reads, 0)
+        self.assertEqual(self.collector.captured["images"], [ready.request.url])
 
 
 class MonitorTests(unittest.IsolatedAsyncioTestCase):
@@ -249,7 +291,9 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(kwargs["network_idle"])
             page = Page()
             await kwargs["page_setup"](page)
-            page.handlers["response"](Response())
+            response = Response()
+            page.handlers["response"](response)
+            page.handlers["requestfinished"](response.request)
             page.handlers["domcontentloaded"]()
             await asyncio.sleep(10)
 
@@ -270,7 +314,9 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
         async def fetch(session, url, **kwargs):
             page = Page()
             await kwargs["page_setup"](page)
-            page.handlers["response"](Response())
+            response = Response()
+            page.handlers["response"](response)
+            page.handlers["requestfinished"](response.request)
             page.handlers["domcontentloaded"]()
             await asyncio.sleep(10)
 

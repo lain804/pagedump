@@ -107,6 +107,9 @@ class _AssetCollector:
         self.captured: dict[str, list[str]] = defaultdict(list)
         self._queue: asyncio.Queue[tuple[Response, str]] = asyncio.Queue()
         self._seen: set[tuple[str, str]] = set()
+        self._saved: set[tuple[str, str]] = set()
+        self._responses: dict[Request, tuple[Response, str]] = {}
+        self._fallbacks: dict[tuple[str, str], tuple[Response, str]] = {}
         self._active: set[Request] = set()
         self._pending = 0
         self._changed = asyncio.Event()
@@ -130,9 +133,18 @@ class _AssetCollector:
             self._touch()
 
     def on_request_done(self, request: Request) -> None:
+        response = self._responses.pop(request, None)
+        if response is not None:
+            self._enqueue(*response)
         if request in self._active:
             self._active.remove(request)
             self._touch()
+
+    def on_request_failed(self, request: Request) -> None:
+        response = self._responses.pop(request, None)
+        if response is not None or categorize(request.resource_type, request.url) in self.selected:
+            logger.warning("Request failed for %s", request.url)
+        self.on_request_done(request)
 
     def on_response(self, response: Response) -> None:
         if self._closed or not 200 <= response.status < 300 or response.status in {204, 205}:
@@ -146,8 +158,17 @@ class _AssetCollector:
             if not match or int(match[1]) + 1 != int(match[2]):
                 logger.warning("Skipping partial response for %s; not a complete asset", request.url)
                 return
-        key = (category, request.url)
+        # Headers arrive before the body. Keep incomplete requests out of the
+        # worker queue so stalled streams cannot starve completed assets.
+        self._responses[request] = (response, category)
+        self._active.add(request)
+        self._touch()
+
+    def _enqueue(self, response: Response, category: str) -> None:
+        key = (category, response.request.url)
         if key in self._seen:
+            if key not in self._saved:
+                self._fallbacks[key] = (response, category)
             return
         self._seen.add(key)
         self._pending += 1
@@ -158,7 +179,7 @@ class _AssetCollector:
         self._pages.append(page)
         page.on("request", self.on_request)
         page.on("requestfinished", self.on_request_done)
-        page.on("requestfailed", self.on_request_done)
+        page.on("requestfailed", self.on_request_failed)
         page.on("response", self.on_response)
         page.on("domcontentloaded", self._dom_ready.set)
 
@@ -174,8 +195,12 @@ class _AssetCollector:
                     async with asyncio.timeout(self.timeout):
                         body = await response.body()
                 except Exception as exc:
-                    self._seen.discard((category, response.request.url))
+                    key = (category, response.request.url)
+                    self._seen.discard(key)
                     logger.warning("Could not read %s: %s", response.request.url, exc)
+                    fallback = self._fallbacks.pop(key, None)
+                    if fallback is not None:
+                        self._enqueue(*fallback)
                     continue
                 destination = asset_path(self.output_dir, category, response.request.url)
                 write = asyncio.create_task(asyncio.to_thread(write_asset, destination, body))
@@ -189,17 +214,23 @@ class _AssetCollector:
                         self.errors.append(exc)
                         logger.error("Could not write %s: %s", destination, exc)
                     else:
-                        self.captured[category].append(response.request.url)
+                        self._record_saved(response, category)
                     raise
                 except OSError as exc:
                     self.errors.append(exc)
                     logger.error("Could not write %s: %s", destination, exc)
                     continue
-                self.captured[category].append(response.request.url)
+                self._record_saved(response, category)
             finally:
                 self._pending -= 1
                 self._queue.task_done()
                 self._touch()
+
+    def _record_saved(self, response: Response, category: str) -> None:
+        key = (category, response.request.url)
+        self._saved.add(key)
+        self._fallbacks.pop(key, None)
+        self.captured[category].append(response.request.url)
 
     async def wait_for_idle(self, page: Page | None) -> None:
         # Re-evaluate after every event; a single gather() snapshot misses late responses.
@@ -221,7 +252,7 @@ class _AssetCollector:
         for page in self._pages:
             page.remove_listener("request", self.on_request)
             page.remove_listener("requestfinished", self.on_request_done)
-            page.remove_listener("requestfailed", self.on_request_done)
+            page.remove_listener("requestfailed", self.on_request_failed)
             page.remove_listener("response", self.on_response)
             page.remove_listener("domcontentloaded", self._dom_ready.set)
         self._pages.clear()
@@ -237,6 +268,9 @@ class _AssetCollector:
             self._queue.get_nowait()
             self._queue.task_done()
         self._pending = 0
+        self._responses.clear()
+        self._fallbacks.clear()
+        self._active.clear()
 
 
 async def _collect(session: AsyncStealthySession, collector: _AssetCollector,
