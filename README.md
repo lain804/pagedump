@@ -58,8 +58,9 @@ through retries.
 Cloudflare solving is enabled by default; it waits for page loading and the
 solver before evaluating asset idleness, adding waiting even on ordinary pages.
 Use `--no-solve-cloudflare` to disable it, or `--solve-cloudflare` to enable it explicitly.
-`--headed` shows the browser and `-v` lists saved URLs. Cookie files use Netscape
-format.
+`--headed` only shows the browser. `-v` / `--verbose` enables debug and progress
+logs, including saved URLs. Without it, only warnings, errors, and the saved-assets
+summary are shown. Cookie files use Netscape format.
 
 This captures assets the browser actually requests during the collection window.
 It does not scroll, click, crawl linked files, or assemble streaming media.

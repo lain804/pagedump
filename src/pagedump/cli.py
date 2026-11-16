@@ -106,10 +106,13 @@ def main(argv: Sequence[str] | None = None) -> None:
     except (OSError, ValueError) as exc:
         parser.error(str(exc))
 
+    level = logging.DEBUG if args.verbose else logging.WARNING
     logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
+        level=level,
         format="[%(asctime)s] [%(levelname)s] %(message)s",
     )
+    logger.setLevel(level)
+    logging.getLogger("scrapling").setLevel(level)
     try:
         captured = asyncio.run(
             monitor(args.url, headed=args.headed, selected=set(args.assets),

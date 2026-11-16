@@ -1,5 +1,6 @@
 import contextlib
 import io
+import logging
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -8,6 +9,36 @@ from pagedump.cli import main
 
 
 class CliTests(unittest.TestCase):
+    def test_diagnostic_logs_require_verbose_independently_of_headed(self):
+        root = logging.getLogger()
+        loggers = [logging.getLogger(name) for name in ("pagedump", "scrapling")]
+
+        async def run(*args, **kwargs):
+            for logger in loggers:
+                logger.debug("%s debug", logger.name)
+                logger.info("%s progress", logger.name)
+                logger.warning("%s warning", logger.name)
+            return {}
+
+        for headed in ([], ["--headed"]):
+            for verbose in ([], ["-v"], ["--verbose"]):
+                with self.subTest(headed=headed, verbose=verbose), contextlib.ExitStack() as stack:
+                    output = io.StringIO()
+                    stack.enter_context(contextlib.redirect_stderr(output))
+                    stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+                    stack.enter_context(patch.object(root, "handlers", []))
+                    stack.callback(root.setLevel, root.level)
+                    for logger in loggers:
+                        stack.callback(logger.setLevel, logger.level)
+                    stack.enter_context(patch.object(loggers[1], "handlers", [logging.StreamHandler(output)]))
+                    monitor = stack.enter_context(patch("pagedump.cli.monitor", AsyncMock(side_effect=run)))
+                    main(["https://example.com", *headed, *verbose])
+                    self.assertEqual(monitor.await_args.kwargs["headed"], bool(headed))
+                    for logger in loggers:
+                        self.assertEqual(f"{logger.name} debug" in output.getvalue(), bool(verbose))
+                        self.assertEqual(f"{logger.name} progress" in output.getvalue(), bool(verbose))
+                        self.assertIn(f"{logger.name} warning", output.getvalue())
+
     def test_cloudflare_is_enabled_by_default_and_can_be_disabled(self):
         for flags, enabled in (([], True), (["--solve-cloudflare"], True),
                                (["--no-solve-cloudflare"], False)):
