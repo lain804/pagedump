@@ -7,7 +7,7 @@ authors = [
     { name = "lain", email = "lain" }
 ]
 requires-python = ">=3.13"
-dependencies = ["scrapling[fetchers]>=0.4"]
+dependencies = ["scrapling[fetchers]>=0.5.1"]
 
 [project.scripts]
 pagedump = "pagedump:main"

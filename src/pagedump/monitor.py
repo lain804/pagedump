@@ -316,6 +316,7 @@ async def monitor(
         async with AsyncStealthySession(
             headless=not headed, timeout=timeout, google_search=True,
             solve_cloudflare=solve_cloudflare, cookies=cookies, retries=1,
+            additional_args={"ignore_https_errors": False, "chromium_sandbox": True},
         ) as session:
             timed_out = False
             try:

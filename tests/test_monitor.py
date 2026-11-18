@@ -288,6 +288,8 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
     async def test_deadline_keeps_saved_assets_and_cancels_workers(self):
         async def fetch(session, url, **kwargs):
             self.assertEqual(session.kwargs["retries"], 1)
+            self.assertEqual(session.kwargs["additional_args"],
+                             {"ignore_https_errors": False, "chromium_sandbox": True})
             self.assertFalse(kwargs["network_idle"])
             page = Page()
             await kwargs["page_setup"](page)
