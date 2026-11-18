@@ -5,7 +5,7 @@ import threading
 import unittest
 import weakref
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from pagedump.monitor import _AssetCollector, asset_path, categorize, monitor, write_asset
 
@@ -197,6 +197,19 @@ class CollectorTests(unittest.IsolatedAsyncioTestCase):
         self.complete(Response())
         await self.collector.wait_for_idle(self.page)
         self.assertEqual(set(self.collector.captured), {"audio", "video"})
+
+    async def test_range_length_uses_transferred_bytes_and_allows_retry(self):
+        headers = {"content-range": "bytes 0-9/10"}
+        short = Response(status=206, headers=headers, body=b"abc")
+        with self.assertLogs("pagedump", level="WARNING"):
+            self.complete(short)
+            await self.collector._queue.join()
+        self.assertFalse(self.collector.captured)
+        encoded = Response(status=206, headers={**headers, "content-encoding": "gzip"}, body=b"decoded")
+        encoded.request.sizes = AsyncMock(return_value={"responseBodySize": 10})
+        self.complete(encoded)
+        await self.collector.wait_for_idle(self.page)
+        self.assertEqual(next((self.root / "images").iterdir()).read_bytes(), b"decoded")
 
     async def test_body_timeout_is_reported_without_recording_a_saved_asset(self):
         self.collector.timeout = 0.01

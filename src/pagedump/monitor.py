@@ -155,7 +155,8 @@ class _AssetCollector:
         if category not in self.selected:
             return
         if response.status == 206:
-            match = re.fullmatch(r"bytes 0-(\d+)/(\d+)", response.headers.get("content-range", ""))
+            match = re.fullmatch(r"bytes 0-([0-9]{1,20})/([0-9]{1,20})",
+                                 response.headers.get("content-range", ""), re.IGNORECASE)
             if not match or int(match[1]) + 1 != int(match[2]):
                 logger.warning("Skipping partial response for %s; not a complete asset", request.url)
                 return
@@ -195,6 +196,14 @@ class _AssetCollector:
                 try:
                     async with asyncio.timeout(self.timeout):
                         body = await response.body()
+                        if response.status == 206:
+                            expected = int(response.headers["content-range"].rsplit("/", 1)[1])
+                            size = len(body)
+                            if response.headers.get("content-encoding", "identity").lower() != "identity":
+                                # Chromium exposes decoded bytes; ranges count encoded bytes.
+                                size = (await response.request.sizes())["responseBodySize"]
+                            if size != expected:
+                                raise ValueError(f"range declares {expected} bytes but received {size}")
                 except Exception as exc:
                     key = (category, response.request.url)
                     self._seen.discard(key)
