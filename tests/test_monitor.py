@@ -1,7 +1,9 @@
 import asyncio
+import gc
 import tempfile
 import threading
 import unittest
+import weakref
 from pathlib import Path
 from unittest.mock import patch
 
@@ -225,6 +227,28 @@ class CollectorTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.wait_for(closing, 1)
         self.assertEqual(len(self.collector.captured["images"]), 1)
         self.assertTrue(all(worker.done() for worker in self.collector._workers))
+
+    async def test_failed_writes_release_bodies_and_keep_first_error(self):
+        references = []
+
+        class Body(bytearray):
+            pass
+
+        async def read():
+            body = Body(b"asset")
+            references.append(weakref.ref(body))
+            return body
+
+        def fail(destination, body):
+            raise OSError("disk full")
+
+        with patch("pagedump.monitor.write_asset", new=fail), self.assertLogs("pagedump", level="ERROR"):
+            for i in range(6):
+                self.complete(Response(f"https://example.com/{i}.png", read=read))
+            await self.collector._queue.join()
+        gc.collect()
+        self.assertEqual(len(self.collector.errors), 1)
+        self.assertTrue(all(ref() is None for ref in references))
 
     async def test_stalled_responses_do_not_occupy_save_workers(self):
         stalled = [Response(f"https://example.com/stalled{i}.png", delay=10) for i in range(10)]

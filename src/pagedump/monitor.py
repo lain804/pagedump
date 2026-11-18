@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import tempfile
+from copy import copy
 from collections import defaultdict
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
@@ -211,20 +212,27 @@ class _AssetCollector:
                     try:
                         await write
                     except OSError as exc:
-                        self.errors.append(exc)
-                        logger.error("Could not write %s: %s", destination, exc)
+                        self._write_failed(destination, exc)
                     else:
                         self._record_saved(response, category)
                     raise
                 except OSError as exc:
-                    self.errors.append(exc)
-                    logger.error("Could not write %s: %s", destination, exc)
+                    self._write_failed(destination, exc)
                     continue
                 self._record_saved(response, category)
             finally:
+                # Idle workers must not retain their last (potentially large) body
+                # or the completed to_thread task and its arguments.
+                body = write = response = None
                 self._pending -= 1
                 self._queue.task_done()
                 self._touch()
+
+    def _write_failed(self, destination: Path, exc: OSError) -> None:
+        if not self.errors:
+            # The original traceback and exception chain reference the response body.
+            self.errors.append(copy(exc))
+        logger.error("Could not write %s: %s", destination, exc)
 
     def _record_saved(self, response: Response, category: str) -> None:
         key = (category, response.request.url)
