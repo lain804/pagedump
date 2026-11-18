@@ -41,10 +41,15 @@ errors cause a nonzero exit status.
 
 After page preparation, collection finishes once scripts and styles have finished
 and selected assets have been idle for `--idle-timeout` milliseconds (default:
-500). With `--no-solve-cloudflare`, collection watches assets after DOM readiness,
-so unrelated background polling and unselected slow resources do not hold it
-open. Increase this window for pages that discover assets
-later. `--concurrency` limits simultaneous body reads and disk writes (default:
+500). Repeated requests for already saved assets do not extend the idle window,
+except scripts, styles, and documents that can discover further assets. Explicit
+event streams and multipart image streams are skipped. When the idle window ends,
+pagedump waits for headers from outstanding fetch/XHR requests to identify
+selected assets. A request that never sends headers can keep collection open
+until `--timeout`. Later unselected polls do not extend that wait.
+With `--no-solve-cloudflare`, collection watches assets after DOM readiness.
+Increase the idle window for pages that discover assets later.
+`--concurrency` limits simultaneous body reads and disk writes (default:
 8); browser request concurrency is unchanged.
 
 `--timeout` (alias `--load-timeout`) sets a collection deadline in milliseconds

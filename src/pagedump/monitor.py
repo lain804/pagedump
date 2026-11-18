@@ -35,6 +35,7 @@ RESOURCE_TYPES = {
     "script": "scripts", "image": "images", "stylesheet": "css", "font": "fonts",
     "document": "documents",
 }
+DISCOVERY_RESOURCE_TYPES = {"script", "stylesheet", "document"}
 
 
 MIME_TYPES = {
@@ -54,6 +55,8 @@ MIME_TYPES = {
 def categorize(resource_type: str, url: str, content_type: str = "") -> str | None:
     """Prefer response metadata, including for extensionless and XHR assets."""
     mime = content_type.partition(";")[0].strip().lower()
+    if mime in {"text/event-stream", "multipart/x-mixed-replace"}:
+        return None  # These streams have no complete asset body to save.
     for prefix, category in (("image/", "images"), ("font/", "fonts"),
                              ("audio/", "audio"), ("video/", "video")):
         if mime.startswith(prefix):
@@ -108,10 +111,11 @@ class _AssetCollector:
         self.captured: dict[str, list[str]] = defaultdict(list)
         self._queue: asyncio.Queue[tuple[Response, str]] = asyncio.Queue()
         self._seen: set[tuple[str, str]] = set()
-        self._saved: set[tuple[str, str]] = set()
+        self._saved: dict[str, set[str]] = defaultdict(set)
         self._responses: dict[Request, tuple[Response, str]] = {}
         self._fallbacks: dict[tuple[str, str], tuple[Response, str]] = {}
         self._active: set[Request] = set()
+        self._awaiting_headers: set[Request] = set()
         self._pending = 0
         self._changed = asyncio.Event()
         self._dom_ready = asyncio.Event()
@@ -127,13 +131,22 @@ class _AssetCollector:
         self._changed.set()
 
     def on_request(self, request: Request) -> None:
-        category = categorize(request.resource_type, request.url)
-        # Scripts and styles can discover selected assets even when not being saved.
-        if category in self.selected or request.resource_type in {"script", "stylesheet", "document"}:
+        if self._closed or request.method == "HEAD":
+            return
+        if request.resource_type in DISCOVERY_RESOURCE_TYPES:
             self._active.add(request)
             self._touch()
+        elif request.url not in self._saved and (
+            request.resource_type in {"fetch", "xhr"} or categorize(request.resource_type, request.url) in self.selected
+        ):
+            self._awaiting_headers.add(request)
 
     def on_request_done(self, request: Request) -> None:
+        if self._closed:
+            return
+        if request in self._awaiting_headers:
+            self._awaiting_headers.remove(request)
+            self._changed.set()
         response = self._responses.pop(request, None)
         if response is not None:
             self._enqueue(*response)
@@ -142,24 +155,37 @@ class _AssetCollector:
             self._touch()
 
     def on_request_failed(self, request: Request) -> None:
+        if self._closed:
+            return
         response = self._responses.pop(request, None)
         if response is not None or categorize(request.resource_type, request.url) in self.selected:
             logger.warning("Request failed for %s", request.url)
         self.on_request_done(request)
 
-    def on_response(self, response: Response) -> None:
-        if self._closed or not 200 <= response.status < 300 or response.status in {204, 205}:
-            return
+    @staticmethod
+    def _response_category(response: Response) -> str | None:
         request = response.request
-        category = categorize(request.resource_type, request.url, response.headers.get("content-type", ""))
-        if category not in self.selected:
-            return
+        if request.method == "HEAD" or not 200 <= response.status < 300 or response.status in {204, 205}:
+            return None
         if response.status == 206:
             match = re.fullmatch(r"bytes 0-([0-9]{1,20})/([0-9]{1,20})",
                                  response.headers.get("content-range", ""), re.IGNORECASE)
             if not match or int(match[1]) + 1 != int(match[2]):
                 logger.warning("Skipping partial response for %s; not a complete asset", request.url)
-                return
+                return None
+        return categorize(request.resource_type, request.url, response.headers.get("content-type", ""))
+
+    def on_response(self, response: Response) -> None:
+        if self._closed:
+            return
+        request = response.request
+        self._awaiting_headers.discard(request)
+        category = self._response_category(response)
+        if category is None:
+            self._active.discard(request)
+        self._changed.set()
+        if category not in self.selected or category in self._saved.get(request.url, ()):
+            return
         # Headers arrive before the body. Keep incomplete requests out of the
         # worker queue so stalled streams cannot starve completed assets.
         self._responses[request] = (response, category)
@@ -169,7 +195,7 @@ class _AssetCollector:
     def _enqueue(self, response: Response, category: str) -> None:
         key = (category, response.request.url)
         if key in self._seen:
-            if key not in self._saved:
+            if category not in self._saved.get(response.request.url, ()):
                 self._fallbacks[key] = (response, category)
             return
         self._seen.add(key)
@@ -245,22 +271,31 @@ class _AssetCollector:
 
     def _record_saved(self, response: Response, category: str) -> None:
         key = (category, response.request.url)
-        self._saved.add(key)
+        self._saved[response.request.url].add(category)
         self._fallbacks.pop(key, None)
         self.captured[category].append(response.request.url)
 
     async def wait_for_idle(self, page: Page | None) -> None:
         # Re-evaluate after every event; a single gather() snapshot misses late responses.
         self._touch()
+        cutoff = None
+        outstanding: set[Request] = set()
         while True:
             self._changed.clear()
-            remaining = self.idle_timeout - (asyncio.get_running_loop().time() - self._last_activity)
-            if not self._active and not self._pending and remaining <= 0:
-                self._stop_listening()
-                return
+            remaining = None
+            if not self._active and not self._pending:
+                remaining = self._last_activity + self.idle_timeout - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    # Resolve requests already in flight at idle. Later polls cannot extend this window.
+                    if cutoff != self._last_activity:
+                        outstanding = self._awaiting_headers.copy()
+                        cutoff = self._last_activity
+                    if outstanding.isdisjoint(self._awaiting_headers):
+                        self._stop_listening()
+                        return
+                    remaining = None
             try:
-                await asyncio.wait_for(self._changed.wait(), timeout=max(remaining, 0.001)
-                                       if not self._active and not self._pending else None)
+                await asyncio.wait_for(self._changed.wait(), timeout=remaining)
             except TimeoutError:
                 pass
 
@@ -288,6 +323,7 @@ class _AssetCollector:
         self._responses.clear()
         self._fallbacks.clear()
         self._active.clear()
+        self._awaiting_headers.clear()
 
 
 async def _collect(session: AsyncStealthySession, collector: _AssetCollector,

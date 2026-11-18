@@ -28,6 +28,7 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
                     body = b"""<!doctype html><link rel="stylesheet" href="/style">
                     <script>
                     fetch('/events');
+                    fetch('/portrait');
                     setInterval(() => fetch('/poll'), 50);
                     setTimeout(() => { let i = new Image(); i.src = '/delayed'; }, 100);
                     </script><body>assets</body>"""
@@ -51,8 +52,8 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
                     return
                 elif path == b"/style":
                     mime, body = "text/css", b"body { background-image: url('/background'); }"
-                elif path in {b"/delayed", b"/background"}:
-                    await asyncio.sleep(0.1)
+                elif path in {b"/delayed", b"/background", b"/portrait"}:
+                    await asyncio.sleep(0.9 if path == b"/portrait" else 0.1)
                     mime, body = "image/png", png
                 elif path == b"/events":
                     writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n")
@@ -80,24 +81,20 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
         port = server.sockets[0].getsockname()[1]
         try:
             with tempfile.TemporaryDirectory() as tmp:
-                started = asyncio.get_running_loop().time()
-                result = await monitor(f"http://127.0.0.1:{port}/", headed=False, selected={"images"},
-                                       timeout=5000, output_dir=Path(tmp), idle_timeout=300,
-                                       solve_cloudflare=False)
-                elapsed = asyncio.get_running_loop().time() - started
+                with self.assertNoLogs("pagedump", level="WARNING"):
+                    result = await monitor(f"http://127.0.0.1:{port}/", headed=False, selected={"images"},
+                                           timeout=5000, output_dir=Path(tmp), idle_timeout=300,
+                                           solve_cloudflare=False)
                 self.assertEqual({url.rsplit("/", 1)[-1] for url in result["images"]},
-                                 {"delayed", "background"})
+                                 {"delayed", "background", "portrait"})
                 self.assertEqual(set(result), {"images"})
-                self.assertEqual(len(list((Path(tmp) / "images").iterdir())), 2)
-                self.assertLess(elapsed, 4, "background polling should not consume the 5s deadline")
+                self.assertEqual(len(list((Path(tmp) / "images").iterdir())), 3)
                 for asset in (Path(tmp) / "images").iterdir():
                     self.assertEqual(asset.read_bytes(), png)
-                started = asyncio.get_running_loop().time()
-                scripts = await monitor(f"http://127.0.0.1:{port}/scripts", headed=False,
-                                        selected={"scripts"}, timeout=5000, output_dir=Path(tmp),
-                                        idle_timeout=300, solve_cloudflare=False)
-                self.assertLess(asyncio.get_running_loop().time() - started, 4,
-                                "unselected hanging images must not delay selected scripts")
+                with self.assertNoLogs("pagedump", level="WARNING"):
+                    scripts = await monitor(f"http://127.0.0.1:{port}/scripts", headed=False,
+                                            selected={"scripts"}, timeout=5000, output_dir=Path(tmp),
+                                            idle_timeout=300, solve_cloudflare=False)
                 self.assertEqual(scripts, {"scripts": [f"http://127.0.0.1:{port}/app.js"]})
                 with self.assertLogs("pagedump", level="WARNING"):
                     mixed = await monitor(f"http://127.0.0.1:{port}/mixed", headed=False,

@@ -35,9 +35,10 @@ class CategorizeTests(unittest.TestCase):
 
 
 class Request:
-    def __init__(self, url, resource_type="image"):
+    def __init__(self, url, resource_type="image", method="GET"):
         self.url = url
         self.resource_type = resource_type
+        self.method = method
 
 
 class Response:
@@ -174,6 +175,42 @@ class CollectorTests(unittest.IsolatedAsyncioTestCase):
         self.collector.on_request_done(request)
         await asyncio.wait_for(waiting, 0.5)
         self.assertEqual(self.collector.captured["images"], [request.url])
+
+    async def test_idle_resolves_inflight_fetch_without_waiting_for_later_polls(self):
+        response = Response("https://example.com/portrait")
+        response.request.resource_type = "fetch"
+        self.collector.on_request(response.request)
+        waiting = asyncio.create_task(self.collector.wait_for_idle(self.page))
+        await asyncio.sleep(0.03)
+        self.assertFalse(waiting.done())
+        self.complete(response)
+        poll = Request("https://example.com/poll", "xhr")
+        self.collector.on_request(poll)
+        await self.collector._queue.join()
+        await asyncio.sleep(0.03)
+        self.assertFalse(waiting.done())
+        self.collector.on_request(Request("https://example.com/next-poll", "xhr"))
+        self.collector.on_request_done(poll)
+        await asyncio.wait_for(waiting, 0.5)
+        self.assertEqual(self.collector.captured, {"images": [response.request.url]})
+
+    async def test_rejected_headers_release_stalled_requests(self):
+        for status, mime, headers in [(404, "image/png", {}), (200, "text/event-stream", {}),
+                                      (206, "image/png", {"content-range": "bytes 1-2/5"})]:
+            response = Response(status=status, mime=mime, headers=headers)
+            response.request.resource_type = "document"
+            self.collector.on_request(response.request)
+            self.collector.on_response(response)
+        await asyncio.wait_for(self.collector.wait_for_idle(self.page), 0.5)
+        self.assertFalse(self.collector.captured)
+
+    async def test_saved_url_with_misleading_extension_does_not_hold_idle(self):
+        response = Response("https://example.com/preview.png", mime="video/mp4")
+        self.complete(response)
+        await self.collector._queue.join()
+        self.collector.on_request(Request(response.request.url, "fetch"))
+        await asyncio.wait_for(self.collector.wait_for_idle(self.page), 0.5)
+        self.assertEqual(self.collector.captured, {"video": [response.request.url]})
 
     async def test_status_filter_and_partial_content(self):
         responses = [Response(f"https://example.com/{status}.png", status=status)
