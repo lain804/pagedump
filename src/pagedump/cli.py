@@ -33,7 +33,7 @@ def load_netscape_cookies(path: Path) -> list[dict[str, object]]:
         if not domain or not cookie_path.startswith("/") or not name:
             raise ValueError(f"{path}:{line_number}: domain, absolute path, and name are required")
         try:
-            expiry = int(expires)
+            expiry = int(expires or "0")
         except ValueError as exc:
             raise ValueError(f"{path}:{line_number}: expiry must be an integer") from exc
 

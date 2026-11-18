@@ -1,14 +1,27 @@
 import contextlib
 import io
 import logging
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from pagedump.cli import main
+from pagedump.cli import load_netscape_cookies, main
 
 
 class CliTests(unittest.TestCase):
+    def test_empty_cookie_expiry_is_a_session_cookie(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cookies.txt"
+            row = "example.test\tFALSE\t/\tTRUE\t{}\tprefs\tvalue\n"
+            path.write_text(row.format(""), encoding="utf-8")
+            [cookie] = load_netscape_cookies(path)
+            self.assertEqual(cookie["name"], "prefs")
+            self.assertNotIn("expires", cookie)
+            path.write_text(row.format("invalid"), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "expiry must be an integer"):
+                load_netscape_cookies(path)
+
     def test_diagnostic_logs_require_verbose_independently_of_headed(self):
         root = logging.getLogger()
         loggers = [logging.getLogger(name) for name in ("pagedump", "scrapling")]
