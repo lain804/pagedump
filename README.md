@@ -32,6 +32,12 @@ Asset categories are `scripts`, `images`, `css`, `fonts`, `audio`, `video`,
 `documents`, and `media`, or `all` (the default). `media` includes audio,
 video, and media with an unknown subtype. Response content types identify
 extensionless assets, including assets requested through fetch/XHR.
+HEAD probes are ignored so they cannot replace the body of a later GET.
+
+`X-Content-Type-Options: nosniff` does not exclude an asset. Complete response
+bodies exposed by Chromium are collected, including downloaded scripts that
+Chromium refuses to execute because of a MIME mismatch. Requests blocked before
+a complete response is available cannot be saved; pagedump does not refetch them.
 
 Files are grouped by category. Names retain the URL basename and extension
 with a stable URL hash appended, so different directories or query strings
@@ -80,4 +86,5 @@ PAGEDUMP_BROWSER_TESTS=1 uv run python -m unittest discover -s tests -v
 ```
 
 The second command also exercises an installed Chromium against local pages with
-delayed assets, continuous background traffic, and an unrelated hanging image.
+delayed assets, continuous background traffic, an unrelated hanging image,
+HEAD probes, and `nosniff` responses with both Cloudflare settings.

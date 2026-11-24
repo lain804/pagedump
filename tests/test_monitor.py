@@ -118,6 +118,77 @@ class CollectorTests(unittest.IsolatedAsyncioTestCase):
         self.collector.on_response(response)
         self.collector.on_request_done(response.request)
 
+    async def test_head_does_not_preempt_get_for_same_url(self):
+        head = Response(body=b"")
+        head.request.method = "HEAD"
+        self.complete(head)
+        await self.collector._queue.join()
+        get = Response(body=b"actual image")
+        self.complete(get)
+        await self.collector.wait_for_idle(self.page)
+        self.assertEqual(head.reads, 0)
+        self.assertEqual(next((self.root / "images").iterdir()).read_bytes(), b"actual image")
+
+    async def test_saved_duplicate_polling_does_not_delay_idle(self):
+        self.complete(Response())
+        await self.collector._queue.join()
+
+        async def poll():
+            while True:
+                response = Response()
+                self.collector.on_request(response.request)
+                self.complete(response)
+                await asyncio.sleep(0.002)
+
+        polling = asyncio.create_task(poll())
+        try:
+            await asyncio.wait_for(self.collector.wait_for_idle(self.page), 0.15)
+            self.assertFalse(polling.done())
+            self.assertEqual(len(self.collector.captured["images"]), 1)
+        finally:
+            polling.cancel()
+            await asyncio.gather(polling, return_exceptions=True)
+
+    async def test_unselected_response_mime_releases_request_tracking(self):
+        self.collector.selected = {"images"}
+        for mime in ("video/mp4", "text/event-stream", "multipart/x-mixed-replace"):
+            response = Response(mime=mime)
+            self.collector.on_request(response.request)
+            self.collector.on_response(response)
+        await asyncio.wait_for(self.collector.wait_for_idle(self.page), 0.15)
+        self.assertFalse(self.collector.captured)
+
+    async def test_idle_worker_releases_last_body(self):
+        references = []
+
+        class Body(bytearray):
+            pass
+
+        async def read():
+            body = Body(b"asset")
+            references.append(weakref.ref(body))
+            return body
+
+        self.complete(Response(read=read))
+        await self.collector._queue.join()
+        gc.collect()
+        self.assertIsNone(references[0]())
+
+    async def test_nosniff_response_is_collected(self):
+        response = Response(headers={"x-content-type-options": "nosniff"})
+        self.complete(response)
+        await self.collector.wait_for_idle(self.page)
+        self.assertEqual(self.collector.captured, {"images": [response.request.url]})
+
+    async def test_failed_request_never_saves_a_partial_body(self):
+        response = Response(body=b"truncated")
+        self.collector.on_response(response)
+        with self.assertLogs("pagedump", level="WARNING"):
+            self.collector.on_request_failed(response.request)
+        await self.collector.wait_for_idle(self.page)
+        self.assertEqual(response.reads, 0)
+        self.assertFalse(self.collector.captured)
+
     async def test_concurrency_is_bounded_and_duplicates_are_read_once(self):
         active = maximum = 0
 

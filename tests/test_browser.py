@@ -7,11 +7,86 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from pagedump.monitor import monitor
+from pagedump.monitor import asset_path, monitor
 
 
 @unittest.skipUnless(os.environ.get("PAGEDUMP_BROWSER_TESTS") == "1", "requires installed Chromium")
 class BrowserTests(unittest.IsolatedAsyncioTestCase):
+    async def test_nosniff_assets_and_head_probe(self):
+        png = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a2ioAAAAASUVORK5CYII="
+        )
+        routes = {
+            b"/": ("text/html", b"""<!doctype html>
+                <link rel="stylesheet" href="/style">
+                <script src="/script"></script><script src="/blocked-script"></script>
+                <img src="/image"><script>
+                fetch('/fetched-script');
+                (async () => {
+                    await fetch('/head-image', {method: 'HEAD'});
+                    await fetch('/head-image');
+                })();
+                </script>"""),
+            b"/style": ("text/css", b"body { background-image: url('/background'); }"),
+            b"/script": ("text/javascript", b"fetch('/executed');"),
+            b"/blocked-script": ("text/plain", b"fetch('/blocked-executed');"),
+            b"/fetched-script": ("application/javascript", b"window.fetched = true;"),
+            **{path: ("image/png", png) for path in (b"/image", b"/head-image", b"/background")},
+        }
+        connections = set()
+        requested = set()
+
+        async def handle(reader, writer):
+            connections.add(writer)
+            try:
+                head = await reader.readuntil(b"\r\n\r\n")
+                method, path, _ = head.split(b" ", 2)
+                requested.add(path)
+                mime, body = routes.get(path, ("text/plain", b""))
+                writer.write((f"HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\n"
+                              "X-Content-Type-Options: nosniff\r\n"
+                              f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n").encode())
+                if method != b"HEAD":
+                    writer.write(body)
+                await writer.drain()
+            except (asyncio.IncompleteReadError, ConnectionError):
+                pass
+            finally:
+                writer.close()
+                try:
+                    await writer.wait_closed()
+                except ConnectionError:
+                    pass
+                connections.discard(writer)
+
+        server = await asyncio.start_server(handle, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        base = f"http://127.0.0.1:{port}"
+        try:
+            for solve in (False, True):
+                with self.subTest(solve_cloudflare=solve), tempfile.TemporaryDirectory() as tmp:
+                    requested.clear()
+                    result = await monitor(base + "/", headed=False, selected={"all"},
+                                           timeout=10000, idle_timeout=300, output_dir=Path(tmp),
+                                           solve_cloudflare=solve)
+                    self.assertEqual({category: set(urls) for category, urls in result.items()}, {
+                        "documents": {base + "/"}, "css": {base + "/style"},
+                        "scripts": {base + path for path in ("/script", "/fetched-script", "/blocked-script")},
+                        "images": {base + path for path in ("/image", "/head-image", "/background")},
+                    })
+                    self.assertIn(b"/executed", requested)
+                    self.assertNotIn(b"/blocked-executed", requested,
+                                     "nosniff blocks execution but leaves this complete body available")
+                    for category, urls in result.items():
+                        for url in urls:
+                            path = url.removeprefix(base).encode()
+                            self.assertEqual(asset_path(Path(tmp), category, url).read_bytes(), routes[path][1])
+        finally:
+            server.close()
+            await server.wait_closed()
+            for writer in list(connections):
+                writer.close()
+
     async def test_delayed_extensionless_assets_with_continuous_background_traffic(self):
         png = base64.b64decode(
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a2ioAAAAASUVORK5CYII="
