@@ -1,5 +1,6 @@
 import asyncio
 import gc
+import ntpath
 import tempfile
 import threading
 import unittest
@@ -72,6 +73,12 @@ class Page:
 
 
 class AssetPathTests(unittest.TestCase):
+    def test_windows_device_names_are_escaped_even_with_multiple_extensions(self):
+        for name in ("CON.backup.png", "nul.tar.js", "COM1.min.js", "LPT².font.woff"):
+            with self.subTest(name=name):
+                destination = asset_path(Path("output"), "images", "https://example.com/" + name)
+                self.assertFalse(ntpath.isreserved(destination.name))
+
     def test_names_are_stable_unique_and_safe(self):
         root = Path("output")
         urls = ["https://example.com/a/image.png", "https://example.com/b/image.png",

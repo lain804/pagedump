@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import ntpath
 import os
 import re
 import tempfile
@@ -82,7 +83,10 @@ def asset_path(output_dir: Path, category: str, url: str) -> Path:
     stem = stem.encode("utf-8")[:180].decode("utf-8", errors="ignore")
     # Always hash: names stay stable regardless of response order and previous runs.
     digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
-    return output_dir / category / f"{stem}-{digest}{extension}"
+    name = f"{stem}-{digest}{extension}"
+    if ntpath.isreserved(name):
+        name = "_" + name
+    return output_dir / category / name
 
 
 def write_asset(destination: Path, body: bytes) -> None:
