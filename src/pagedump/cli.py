@@ -69,7 +69,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--headed", action="store_true", help="Show the browser UI")
     parser.add_argument(
         "--solve-cloudflare", action=argparse.BooleanOptionalAction, default=True,
-        help="Solve Cloudflare challenges (default: enabled; adds waiting even on ordinary pages)",
+        help="Attempt Cloudflare challenges (default: enabled; adds waiting even on ordinary pages)",
     )
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable debug logging")
     parser.add_argument(
@@ -77,8 +77,8 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="TYPE", help="Asset categories to collect (default: all)",
     )
     parser.add_argument(
-        "--timeout", "--load-timeout", dest="timeout", type=int, default=30_000, metavar="MS",
-        help="Collection deadline after browser startup (default: 30000 ms)",
+        "--timeout", "--load-timeout", dest="timeout", type=int, default=60_000, metavar="MS",
+        help="Collection deadline after browser startup (default: 60000 ms)",
     )
     parser.add_argument(
         "--idle-timeout", type=int, default=500, metavar="MS",

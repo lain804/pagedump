@@ -18,6 +18,9 @@ Install Chromium once after installing the package:
 scrapling install
 ```
 
+Requires Scrapling 0.5.1 or newer. The lockfile records the tested version;
+refresh it with `uv lock --upgrade-package scrapling` and `uv sync` to update.
+
 Use it with a page URL:
 
 ```sh
@@ -59,7 +62,7 @@ Increase the idle window for pages that discover assets later.
 8); browser request concurrency is unchanged.
 
 `--timeout` (alias `--load-timeout`) sets a collection deadline in milliseconds
-(default: 30000), starting after browser startup. Body reads share this deadline
+(default: 60000), starting after browser startup. Body reads share this deadline
 and also have individual timeouts. Startup, browser cleanup, and finishing an
 in-progress disk write can take additional time. A timeout keeps completed files
 and emits a warning; timing out before saving any selected assets exits with an
@@ -68,7 +71,14 @@ through retries.
 
 Cloudflare solving is enabled by default; it waits for page loading and the
 solver before evaluating asset idleness, adding waiting even on ordinary pages.
+The current solver spends about five seconds checking ordinary pages; a shorter
+collection timeout can therefore expire even after their assets have loaded.
 Use `--no-solve-cloudflare` to disable it, or `--solve-cloudflare` to enable it explicitly.
+The 60-second default follows Scrapling's recommended minimum solver budget.
+Challenge handling is an attempt, not a verified result: Scrapling can return
+with an unresolved challenge, including after an embedded Turnstile click times
+out. Saving assets does not prove that a challenge was solved. The browser
+regression tests use ordinary local pages and do not validate live CAPTCHAs.
 `--headed` only shows the browser. `-v` / `--verbose` enables debug and progress
 logs, including saved URLs. Without it, only warnings, errors, and the saved-assets
 summary are shown. Cookie files use Netscape format.

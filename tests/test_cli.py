@@ -52,6 +52,12 @@ class CliTests(unittest.TestCase):
                         self.assertEqual(f"{logger.name} progress" in output.getvalue(), bool(verbose))
                         self.assertIn(f"{logger.name} warning", output.getvalue())
 
+    def test_default_timeout_allows_recommended_cloudflare_budget(self):
+        run = AsyncMock(return_value={})
+        with patch("pagedump.cli.monitor", run), contextlib.redirect_stdout(io.StringIO()):
+            main(["https://example.com"])
+        self.assertEqual(run.await_args.kwargs["timeout"], 60_000)
+
     def test_cloudflare_is_enabled_by_default_and_can_be_disabled(self):
         for flags, enabled in (([], True), (["--solve-cloudflare"], True),
                                (["--no-solve-cloudflare"], False)):
