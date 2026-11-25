@@ -13,45 +13,42 @@ logger = logging.getLogger("pagedump")
 
 def load_netscape_cookies(path: Path) -> list[dict[str, object]]:
     cookies: list[dict[str, object]] = []
-    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-        if not line or (line.startswith("#") and not line.startswith("#HttpOnly_")):
-            continue
+    with path.open(encoding="utf-8-sig") as stream:
+        for line_number, line in enumerate(stream, start=1):
+            line = line.removesuffix("\n")
+            is_http_only = line.startswith("#HttpOnly_")
+            if not line or (line.startswith("#") and not is_http_only):
+                continue
 
-        fields = line.split("\t")
-        if len(fields) != 7:
-            raise ValueError(f"{path}:{line_number}: expected 7 tab-separated cookie fields")
+            fields = line.split("\t")
+            if len(fields) != 7:
+                raise ValueError(f"{path}:{line_number}: expected 7 tab-separated cookie fields")
 
-        domain, include_subdomains, cookie_path, secure, expires, name, value = fields
-        is_http_only = domain.startswith("#HttpOnly_")
-        if is_http_only:
-            domain = domain.removeprefix("#HttpOnly_")
+            domain, include_subdomains, cookie_path, secure, expires, name, value = fields
+            domain = domain.removeprefix("#HttpOnly_").lstrip(".")
 
-        if include_subdomains not in {"TRUE", "FALSE"}:
-            raise ValueError(f"{path}:{line_number}: include-subdomains must be TRUE or FALSE")
-        if secure not in {"TRUE", "FALSE"}:
-            raise ValueError(f"{path}:{line_number}: secure must be TRUE or FALSE")
-        if not domain or not cookie_path.startswith("/") or not name:
-            raise ValueError(f"{path}:{line_number}: domain, absolute path, and name are required")
-        try:
-            expiry = int(expires or "0")
-        except ValueError as exc:
-            raise ValueError(f"{path}:{line_number}: expiry must be an integer") from exc
+            if include_subdomains not in {"TRUE", "FALSE"}:
+                raise ValueError(f"{path}:{line_number}: include-subdomains must be TRUE or FALSE")
+            if secure not in {"TRUE", "FALSE"}:
+                raise ValueError(f"{path}:{line_number}: secure must be TRUE or FALSE")
+            if not domain or not cookie_path.startswith("/") or not name:
+                raise ValueError(f"{path}:{line_number}: domain, absolute path, and name are required")
+            try:
+                expiry = int(expires or "0")
+            except ValueError as exc:
+                raise ValueError(f"{path}:{line_number}: expiry must be an integer") from exc
 
-        cookie: dict[str, object] = {
-            "name": name,
-            "value": value,
-            "domain": (
-                "." + domain.lstrip(".")
-                if include_subdomains == "TRUE"
-                else domain.lstrip(".")
-            ),
-            "path": cookie_path,
-            "secure": secure == "TRUE",
-            "httpOnly": is_http_only,
-        }
-        if expiry > 0:
-            cookie["expires"] = expiry
-        cookies.append(cookie)
+            cookie: dict[str, object] = {
+                "name": name,
+                "value": value,
+                "domain": "." + domain if include_subdomains == "TRUE" else domain,
+                "path": cookie_path,
+                "secure": secure == "TRUE",
+                "httpOnly": is_http_only,
+            }
+            if expiry > 0:
+                cookie["expires"] = expiry
+            cookies.append(cookie)
     return cookies
 
 

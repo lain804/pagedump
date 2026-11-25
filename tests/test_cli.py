@@ -10,6 +10,25 @@ from pagedump.cli import load_netscape_cookies, main
 
 
 class CliTests(unittest.TestCase):
+    def test_cookie_rows_preserve_values_and_accept_a_utf8_bom(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cookies.txt"
+            path.write_bytes(("\ufeff# Netscape HTTP Cookie File\r\n"
+                              "#HttpOnly_.example.test\tTRUE\t/account\tTRUE\t0\tprefs\ta\u2028b\r\n"
+                              "example.test\tFALSE\t/\tFALSE\t0\tempty\t").encode("utf-8"))
+            scoped, host = load_netscape_cookies(path)
+            self.assertEqual(scoped, {"name": "prefs", "value": "a\u2028b", "domain": ".example.test",
+                                      "path": "/account", "secure": True, "httpOnly": True})
+            self.assertEqual(host["domain"], "example.test")
+            self.assertEqual(host["value"], "")
+
+    def test_cookie_domain_must_remain_nonempty_after_normalization(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cookies.txt"
+            path.write_text("# Netscape HTTP Cookie File\n.\tFALSE\t/\tFALSE\t0\tprefs\tvalue\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, r":2: domain"):
+                load_netscape_cookies(path)
+
     def test_empty_cookie_expiry_is_a_session_cookie(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "cookies.txt"
