@@ -122,6 +122,8 @@ class CollectorTests(unittest.IsolatedAsyncioTestCase):
         head = Response(body=b"")
         head.request.method = "HEAD"
         self.complete(head)
+        with self.assertNoLogs("pagedump", level="WARNING"):
+            self.collector.on_request_failed(head.request)
         await self.collector._queue.join()
         get = Response(body=b"actual image")
         self.complete(get)
@@ -412,9 +414,24 @@ class CollectorTests(unittest.IsolatedAsyncioTestCase):
         ready = Response(body=b"ready")
         self.collector.on_response(stalled)
         self.complete(ready)
-        await asyncio.wait_for(self.collector._queue.join(), 0.5)
+        await asyncio.wait_for(self.collector.wait_for_idle(self.page), 0.5)
         self.assertEqual(stalled.reads, 0)
         self.assertEqual(self.collector.captured["images"], [ready.request.url])
+
+    async def test_saved_duplicate_still_waits_for_discovery_requests(self):
+        stalled = Response(mime="text/javascript")
+        stalled.request.resource_type = "script"
+        ready = Response(mime="text/javascript")
+        self.collector.on_request(stalled.request)
+        self.collector.on_response(stalled)
+        self.complete(ready)
+        await self.collector._queue.join()
+        waiting = asyncio.create_task(self.collector.wait_for_idle(self.page))
+        await asyncio.sleep(0.03)
+        self.assertFalse(waiting.done())
+        self.collector.on_request_done(stalled.request)
+        await asyncio.wait_for(waiting, 0.5)
+        self.assertEqual(stalled.reads, 0)
 
 
 class MonitorTests(unittest.IsolatedAsyncioTestCase):

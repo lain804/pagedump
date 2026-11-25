@@ -117,8 +117,9 @@ class _AssetCollector:
         self._seen: set[tuple[str, str]] = set()
         self._saved: dict[str, set[str]] = defaultdict(set)
         self._responses: dict[Request, tuple[Response, str]] = {}
+        self._inflight: dict[tuple[str, str], set[Request]] = defaultdict(set)
         self._fallbacks: dict[tuple[str, str], tuple[Response, str]] = {}
-        self._active: set[Request] = set()
+        self._discovery: set[Request] = set()
         self._awaiting_headers: set[Request] = set()
         self._pending = 0
         self._changed = asyncio.Event()
@@ -138,33 +139,37 @@ class _AssetCollector:
         if self._closed or request.method == "HEAD":
             return
         if request.resource_type in DISCOVERY_RESOURCE_TYPES:
-            self._active.add(request)
+            self._discovery.add(request)
             self._touch()
         elif request.url not in self._saved and (
             request.resource_type in {"fetch", "xhr"} or categorize(request.resource_type, request.url) in self.selected
         ):
             self._awaiting_headers.add(request)
 
-    def on_request_done(self, request: Request) -> None:
-        if self._closed:
+    def on_request_done(self, request: Request, *, failed: bool = False) -> None:
+        if self._closed or request.method == "HEAD":
             return
         if request in self._awaiting_headers:
             self._awaiting_headers.remove(request)
             self._changed.set()
         response = self._responses.pop(request, None)
         if response is not None:
-            self._enqueue(*response)
-        if request in self._active:
-            self._active.remove(request)
+            key = (response[1], request.url)
+            requests = self._inflight[key]
+            requests.remove(request)
+            if not requests:
+                del self._inflight[key]
+            if not failed:
+                self._enqueue(*response)
+            self._changed.set()
+        if request in self._discovery:
+            self._discovery.remove(request)
             self._touch()
+        if failed and (response is not None or categorize(request.resource_type, request.url) in self.selected):
+            logger.warning("Request failed for %s", request.url)
 
     def on_request_failed(self, request: Request) -> None:
-        if self._closed:
-            return
-        response = self._responses.pop(request, None)
-        if response is not None or categorize(request.resource_type, request.url) in self.selected:
-            logger.warning("Request failed for %s", request.url)
-        self.on_request_done(request)
+        self.on_request_done(request, failed=True)
 
     @staticmethod
     def _response_category(response: Response) -> str | None:
@@ -183,17 +188,19 @@ class _AssetCollector:
         if self._closed:
             return
         request = response.request
-        self._awaiting_headers.discard(request)
+        if request in self._awaiting_headers:
+            self._awaiting_headers.remove(request)
+            self._changed.set()
         category = self._response_category(response)
-        if category is None:
-            self._active.discard(request)
-        self._changed.set()
+        if category is None and request in self._discovery:
+            self._discovery.remove(request)
+            self._changed.set()
         if category not in self.selected or category in self._saved.get(request.url, ()):
             return
         # Headers arrive before the body. Keep incomplete requests out of the
         # worker queue so stalled streams cannot starve completed assets.
         self._responses[request] = (response, category)
-        self._active.add(request)
+        self._inflight[category, request.url].add(request)
         self._touch()
 
     def _enqueue(self, response: Response, category: str) -> None:
@@ -277,6 +284,8 @@ class _AssetCollector:
         key = (category, response.request.url)
         self._saved[response.request.url].add(category)
         self._fallbacks.pop(key, None)
+        for request in self._inflight.pop(key, ()):
+            del self._responses[request]
         self.captured[category].append(response.request.url)
 
     async def wait_for_idle(self, page: Page | None) -> None:
@@ -287,7 +296,7 @@ class _AssetCollector:
         while True:
             self._changed.clear()
             remaining = None
-            if not self._active and not self._pending:
+            if not self._discovery and not self._inflight and not self._pending:
                 remaining = self._last_activity + self.idle_timeout - asyncio.get_running_loop().time()
                 if remaining <= 0:
                     # Resolve requests already in flight at idle. Later polls cannot extend this window.
@@ -325,8 +334,9 @@ class _AssetCollector:
             self._queue.task_done()
         self._pending = 0
         self._responses.clear()
+        self._inflight.clear()
         self._fallbacks.clear()
-        self._active.clear()
+        self._discovery.clear()
         self._awaiting_headers.clear()
 
 

@@ -50,8 +50,9 @@ errors cause a nonzero exit status.
 
 After page preparation, collection finishes once scripts and styles have finished
 and selected assets have been idle for `--idle-timeout` milliseconds (default:
-500). Repeated requests for already saved assets do not extend the idle window,
-except scripts, styles, and documents that can discover further assets. Explicit
+500). Once an asset is saved, duplicate responses in the same category do not
+extend the idle window, even if their bodies stall. Scripts, styles, and
+documents still count as activity because they can discover further assets. Explicit
 event streams and multipart image streams are skipped. When the idle window ends,
 pagedump waits for headers from outstanding fetch/XHR requests to identify
 selected assets. A request that never sends headers can keep collection open
