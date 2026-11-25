@@ -98,6 +98,7 @@ def write_asset(destination: Path, body: bytes) -> None:
             temporary = Path(stream.name)
             stream.write(body)
         os.replace(temporary, destination)
+        temporary = None
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
